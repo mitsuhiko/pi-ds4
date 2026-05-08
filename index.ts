@@ -1137,7 +1137,7 @@ function registerDs4Provider(pi: ExtensionAPI): void {
 					xhigh: "xhigh",
 				},
 				input: ["text"],
-				contextWindow: 100000,
+				contextWindow: 1000000,
 				maxTokens: 384000,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 			},
