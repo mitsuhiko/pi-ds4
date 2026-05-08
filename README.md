@@ -12,7 +12,7 @@ and stops the server via a bundled watchdog when no clients are left.
 
 You will need a mac with at least 128GB of RAM.  The way this is set up right now
 is that it will install the 2-bit quantized model if you have 128GB of RAM and
-it will pick the 4-bit quantized model if you have 256MB or more.
+it will pick the 4-bit quantized model if you have 256GB or more.
 
 If you are signed into huggingface then your token is used for faster downloads.
 The server is compiled/started and models are downloaded automatically on first
