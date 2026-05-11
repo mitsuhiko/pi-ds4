@@ -138,6 +138,14 @@ server_has_clients() {
   lsof -nP -a -p "$pid" -iTCP -sTCP:ESTABLISHED 2>/dev/null | awk 'NR > 1 { found = 1 } END { exit found ? 0 : 1 }'
 }
 
+server_is_generating() {
+  # Check if any pool slot is actively generating (client may have disconnected
+  # but server is still producing tokens — e.g. bash timeout killed pi mid-stream).
+  resp=$(curl -sf --max-time 2 "$base_url/pool" 2>/dev/null) || return 1
+  echo "$resp" | grep -q '"active"[[:space:]]*:[[:space:]]*true'
+}
+
+
 stop_server() {
   pid=$(managed_server_pid || true)
 
@@ -179,6 +187,15 @@ while :; do
     if server_has_clients; then
       if [ "$waiting_for_clients" -eq 0 ]; then
         log "no active ds4 leases, but ds4-server still has clients; waiting"
+        waiting_for_clients=1
+      fi
+      sleep "$poll_s"
+      continue
+    fi
+
+    if server_is_generating; then
+      if [ "$waiting_for_clients" -eq 0 ]; then
+        log "no active ds4 leases, but ds4-server is still generating; waiting"
         waiting_for_clients=1
       fi
       sleep "$poll_s"

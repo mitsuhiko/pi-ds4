@@ -42,7 +42,7 @@ const SUPPORT_BRANCH = process.env.DS4_SUPPORT_BRANCH ?? "main";
 
 const BASE_URL = "http://127.0.0.1:8000";
 const API_BASE_URL = `${BASE_URL}/v1`;
-const SERVER_BASE_ARGS = ["--ctx", "100000", "--kv-disk-space-mb", "8192"];
+const SERVER_BASE_ARGS = ["--ctx", "100000", "--sessions", "4", "--kv-disk-space-mb", "8192"];
 
 const HEARTBEAT_MS = 10_000;
 const LEASE_TTL_MS = 45_000;
@@ -114,6 +114,7 @@ let watchdogStarted = false;
 let runtimeDisposed = false;
 let shuttingDown = false;
 let writeSeq = 0;
+let cachedTools: unknown[] | undefined;
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -1241,21 +1242,23 @@ function ds4Model(id: string, name: string) {
 }
 
 function registerDs4Provider(pi: ExtensionAPI): void {
+	const compat = {
+		supportsStore: false,
+		supportsDeveloperRole: false,
+		supportsReasoningEffort: true,
+		supportsUsageInStreaming: true,
+		maxTokensField: "max_tokens",
+		supportsStrictMode: false,
+		thinkingFormat: "deepseek",
+		requiresReasoningContentOnAssistantMessages: true,
+		sendSessionAffinityHeaders: true,
+	};
 	pi.registerProvider(PROVIDER_ID, {
 		name: "ds4.c local",
 		baseUrl: API_BASE_URL,
 		api: "openai-completions",
 		apiKey: "dsv4-local",
-		compat: {
-			supportsStore: false,
-			supportsDeveloperRole: false,
-			supportsReasoningEffort: true,
-			supportsUsageInStreaming: true,
-			maxTokensField: "max_tokens",
-			supportsStrictMode: false,
-			thinkingFormat: "deepseek",
-			requiresReasoningContentOnAssistantMessages: true,
-		},
+		compat,
 		models: [
 			ds4Model(MODEL_ID, "DeepSeek V4 Flash (ds4.c local)"),
 			ds4Model(Q2_IMATRIX_MODEL_ID, "DeepSeek V4 Flash q2 imatrix (ds4.c local)"),
@@ -1288,6 +1291,14 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (!modelQuant) return;
 
+		// Cache tools from real requests so warmup can include them.
+		// Tool schemas are injected into the system prompt during tokenization —
+		// without matching tools, warmup creates an incompatible checkpoint.
+		const payloadTools = (_event as any).payload?.tools;
+		if (Array.isArray(payloadTools) && payloadTools.length > 0) {
+			cachedTools = payloadTools;
+		}
+
 		const alreadyReady = await checkHttpReadyForQuant(modelQuant);
 		let lastNotification: string | undefined;
 		const notifyStatus: StatusCallback | undefined = alreadyReady
@@ -1306,6 +1317,132 @@ export default function (pi: ExtensionAPI) {
 		} catch (error) {
 			ctx.ui.notify(`ds4-server startup failed: ${describeError(error)}`, "error");
 			throw error;
+		}
+
+		// Show prefill progress if the pool slot is cold (no cached prefix).
+		// This fires in the background — before_provider_request returns
+		// immediately and the actual HTTP request blocks on prefill.
+		const sessionId = ctx.sessionManager.getSessionId();
+		try {
+			const poolRes = await fetch(`${BASE_URL}/v1/pool`, { signal: AbortSignal.timeout(1000) });
+			if (poolRes.ok) {
+				const pool = await poolRes.json() as any;
+				const mySlot = pool.slots?.find((s: any) => s.session_id === sessionId);
+				// Start progress polling if no slot yet (queued), empty slot, or
+				// slot from template clone that still needs significant prefill.
+				const needsProgress = !mySlot || mySlot.pos === 0 ||
+					(mySlot.pos > 0 && mySlot.pos < 35000);
+				if (needsProgress) {
+					const totalEstimate = 38000; // typical pi prompt size
+					let cancelled = false;
+					let wasQueued = false;
+					const timer = setInterval(async () => {
+						try {
+							const r = await fetch(`${BASE_URL}/v1/pool`, { signal: AbortSignal.timeout(1000) });
+							if (!r.ok) return;
+							const p = await r.json() as any;
+							const slot = p.slots?.find((s: any) => s.session_id === sessionId);
+							if (!slot) {
+								// No slot assigned yet — request is queued behind another
+								wasQueued = true;
+								const queueArr = (p.queue ?? []) as string[];
+								const total = queueArr.length || (p.queued ?? 0) as number;
+								const myPos = queueArr.indexOf(sessionId);
+								const posStr = total > 0
+									? ` (pos ${myPos >= 0 ? myPos + 1 : total}/${total})`
+									: "";
+								ctx.ui.notify(`queued${posStr} — waiting for another session to finish`, "info");
+								return;
+							}
+							if (slot.pos >= totalEstimate - 2048) {
+								clearInterval(timer);
+								cancelled = true;
+								return;
+							}
+							const pct = Math.min(99, Math.round((slot.pos / totalEstimate) * 100));
+							ctx.ui.notify(`prefilling context: ${pct}% (${slot.pos} tokens)`, "info");
+						} catch {}
+					}, 3000);
+					(timer as any).unref?.();
+					// Auto-cancel after 5 minutes
+					setTimeout(() => { if (!cancelled) clearInterval(timer); }, 300_000).unref?.();
+				}
+			}
+		} catch {}
+
+		// When the user aborts (Esc), kill the ds4 worker immediately so queued
+		// requests can proceed.  Without this, the worker continues prefilling
+		// the cancelled request until it tries to write the response.
+		const signal = ctx.signal;
+		if (signal) {
+			const onAbort = async () => {
+				try {
+					const r = await fetch(`${BASE_URL}/v1/pool`, { signal: AbortSignal.timeout(1000) });
+					if (!r.ok) return;
+					const pool = await r.json() as any;
+					const mySlot = pool.slots?.find((s: any) => s.session_id === sessionId);
+					if (mySlot !== undefined) {
+						await fetch(`${BASE_URL}/v1/pool/${mySlot.slot}`, {
+							method: "DELETE",
+							signal: AbortSignal.timeout(2000),
+						});
+					}
+				} catch {}
+			};
+			if (signal.aborted) {
+				onAbort();
+			} else {
+				signal.addEventListener("abort", onAbort, { once: true });
+			}
+		}
+	});
+
+	pi.on("session_compact", async (_event, ctx) => {
+		if (ctx.model?.provider !== PROVIDER_ID || ctx.model?.id !== MODEL_ID) return;
+
+		// After compaction, the session's messages are shorter.  Fire a warmup
+		// so ds4-server rebuilds its KV cache to the compacted prompt before the
+		// user's next message arrives.  This avoids a full cold prefill on the
+		// next real request (which would otherwise take 10-30s at 10K-30K tokens).
+		//
+		// CRITICAL: Include tools in the warmup body.  Tool schemas are injected
+		// into the system prompt during tokenization.  Without tools, the warmup
+		// creates a checkpoint that's token-incompatible with real requests,
+		// destroying the existing valid checkpoint and forcing a full cold prefill
+		// on the next real request.
+		const sessionId = ctx.sessionManager.getSessionId();
+		const sessionContext = ctx.sessionManager.buildSessionContext();
+		if (!sessionContext.messages.length) return;
+
+		// Build a minimal chat request with the post-compaction messages.
+		// The warmup endpoint parses this like a normal /v1/chat/completions
+		// request but only runs prefill (no generation).
+		const messages = sessionContext.messages.map((msg: any) => {
+			if (msg.role === "user" || msg.role === "assistant" || msg.role === "system") {
+				return { role: msg.role, content: typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content) };
+			}
+			return { role: msg.role, content: msg.content };
+		});
+
+		// Use cached tools from the last real request (byte-identical to what
+		// the provider saw, ensuring tokenization matches).
+		const body: Record<string, unknown> = { model: MODEL_ID, messages };
+		if (cachedTools && cachedTools.length > 0) {
+			body.tools = cachedTools;
+		}
+
+		try {
+			await fetch(`${BASE_URL}/v1/warmup`, {
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					"X-Session-Id": sessionId,
+				},
+				body: JSON.stringify(body),
+				signal: AbortSignal.timeout(5_000),
+			});
+		} catch {
+			// Best-effort — warmup failure is not critical.
 		}
 	});
 

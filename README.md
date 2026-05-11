@@ -66,3 +66,28 @@ Environment overrides:
 - `DS4_SERVER_BINARY`: custom `ds4-server` binary path
 
 Use `/ds4` inside pi to show the live ds4 log.
+
+## Performance (multi-session pool)
+
+With the session pool and KV caching enabled (`--sessions 4 --template-tokens 37000
+--kv-disk-dir`):
+
+| Scenario | Prefill | Total | Speedup |
+|----------|---------|-------|---------|
+| Cold start (no cache) | 170–200s | ~300s | 1x |
+| Disk KV cache hit | 39s | ~140s | 4.5x |
+| **Template clone (cross-session)** | **3.6s** | **~5s** | **60x** |
+| Same-session continue | 0.002s | ~1s | 300x |
+
+The template covers the full system prompt (~37K tokens).  After the first
+request primes the template, every subsequent pi session on the same running
+server gets near-instant prefill — only the user message tokens need processing.
+
+Requirements for cross-session cache hits:
+- System prompt must be byte-stable across sessions (no per-session dynamic
+  content in the system prompt — use context messages instead)
+- `template-tokens` should be set just below the system prompt size
+- The ds4-server must stay running between sessions (watchdog keeps it alive
+  while any pi process holds a lease)
+
+Benchmarked on M4 Max 128GB, DeepSeek V4 Flash IQ2_XXS (81GB).
