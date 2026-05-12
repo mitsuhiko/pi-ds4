@@ -1328,14 +1328,14 @@ export default function (pi: ExtensionAPI) {
 			if (poolRes.ok) {
 				const pool = await poolRes.json() as any;
 				const mySlot = pool.slots?.find((s: any) => s.session_id === sessionId);
-				// Start progress polling if no slot yet (queued), empty slot, or
-				// slot from template clone that still needs significant prefill.
+				// Start progress polling if no slot yet (queued) or still prefilling.
 				const needsProgress = !mySlot || mySlot.pos === 0 ||
 					(mySlot.pos > 0 && mySlot.pos < 35000);
 				if (needsProgress) {
-					const totalEstimate = 38000; // typical pi prompt size
 					let cancelled = false;
 					let wasQueued = false;
+					let lastPos = mySlot?.pos ?? 0;
+					let stableCount = 0;
 					const timer = setInterval(async () => {
 						try {
 							const r = await fetch(`${BASE_URL}/v1/pool`, { signal: AbortSignal.timeout(1000) });
@@ -1354,13 +1354,19 @@ export default function (pi: ExtensionAPI) {
 								ctx.ui.notify(`queued${posStr} — waiting for another session to finish`, "info");
 								return;
 							}
-							if (slot.pos >= totalEstimate - 2048) {
-								clearInterval(timer);
-								cancelled = true;
-								return;
+							// Prefill done: pos stopped advancing (generation started)
+							if (slot.pos > 0 && slot.pos === lastPos) {
+								stableCount++;
+								if (stableCount >= 2) {
+									clearInterval(timer);
+									cancelled = true;
+									return;
+								}
+							} else {
+								stableCount = 0;
 							}
-							const pct = Math.min(99, Math.round((slot.pos / totalEstimate) * 100));
-							ctx.ui.notify(`prefilling context: ${pct}% (${slot.pos} tokens)`, "info");
+							lastPos = slot.pos;
+							ctx.ui.notify(`prefilling context (${slot.pos} tokens)`, "info");
 						} catch {}
 					}, 3000);
 					(timer as any).unref?.();

@@ -69,25 +69,29 @@ Use `/ds4` inside pi to show the live ds4 log.
 
 ## Performance (multi-session pool)
 
-With the session pool and KV caching enabled (`--sessions 4 --template-tokens 37000
---kv-disk-dir`):
+With the session pool and KV caching enabled (`--sessions 4 --kv-disk-dir`),
+each pi session gets a stable `X-Session-Id` so ds4-server can route it back to
+the same resident backend session across turns. Switching between warm sessions
+is a pointer swap instead of a full KV rebuild.
 
-| Scenario | Prefill | Total | Speedup |
-|----------|---------|-------|---------|
-| Cold start (no cache) | 170–200s | ~300s | 1x |
-| Disk KV cache hit | 39s | ~140s | 4.5x |
-| **Template clone (cross-session)** | **3.6s** | **~5s** | **60x** |
-| Same-session continue | 0.002s | ~1s | 300x |
+| System prompt | Cold prefill | Pool switch TTFT | Speedup |
+|---------------|-------------:|-----------------:|--------:|
+| 1K tokens | 3.34s | 0.59s | 5.7x |
+| 10K tokens | 42.9s | 0.64s | 67x |
+| 25K tokens | 117.8s | 0.83s | 142x |
+| 50K tokens | 263.7s | 0.88s | 298x |
+| 60K tokens | 487.8s | 1.02s | 477x |
 
-The template covers the full system prompt (~37K tokens).  After the first
-request primes the template, every subsequent pi session on the same running
-server gets near-instant prefill — only the user message tokens need processing.
+The extension also uses `/v1/warmup` after pi compacts a session. Warmup sends
+the post-compaction message history, including the cached tool schema, so
+ds4-server can rebuild that session in the background before the user's next
+visible request.
 
-Requirements for cross-session cache hits:
-- System prompt must be byte-stable across sessions (no per-session dynamic
-  content in the system prompt — use context messages instead)
-- `template-tokens` should be set just below the system prompt size
-- The ds4-server must stay running between sessions (watchdog keeps it alive
-  while any pi process holds a lease)
+Requirements for best cache hits:
+- Keep ds4-server running between sessions (the watchdog keeps it alive while
+  any pi process holds a lease)
+- Send `X-Session-Id` on every request so ds4-server can preserve slot affinity
+- Include tool schemas in warmup requests so the warmed prompt matches real
+  generation requests
 
 Benchmarked on M4 Max 128GB, DeepSeek V4 Flash IQ2_XXS (81GB).
