@@ -1,7 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { closeSync, constants, openSync, writeSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { closeSync, constants, openSync, readFileSync, writeSync } from "node:fs";
 import {
 	access,
 	appendFile,
@@ -26,6 +27,7 @@ const PROVIDER_ID = "ds4";
 const MODEL_ID = "deepseek-v4-flash";
 // Keep the historical typo for on-disk lease/state compatibility with older installs.
 const MANAGED_BY = "pi-sd4-provider";
+const DS4_SERVER_ARGS_RE = /(^|[/\s])ds4-server(\s|$)/;
 
 const DS4_DIR = join(homedir(), ".pi", "ds4");
 const KV_DIR = join(DS4_DIR, "kv");
@@ -39,9 +41,103 @@ const LEASE_FILE = join(CLIENT_DIR, `${process.pid}.json`);
 const SUPPORT_REPO = process.env.DS4_SUPPORT_REPO ?? "https://github.com/antirez/ds4";
 const SUPPORT_BRANCH = process.env.DS4_SUPPORT_BRANCH ?? "main";
 
-const BASE_URL = "http://127.0.0.1:8000";
-const API_BASE_URL = `${BASE_URL}/v1`;
-const SERVER_ARGS = ["--ctx", "100000", "--kv-disk-dir", KV_DIR, "--kv-disk-space-mb", "8192"];
+const SERVER_BIND_HOST = process.env.DS4_HOST ?? "127.0.0.1";
+const SERVER_CLIENT_HOST = SERVER_BIND_HOST === "0.0.0.0" ? "127.0.0.1" : SERVER_BIND_HOST;
+const DEFAULT_SERVER_PORT = 8000;
+const AUTO_PORT_SCAN_COUNT = parseScanCount(process.env.DS4_AUTO_PORT_SCAN_COUNT);
+
+function syncProcessArgs(pid: number): string | undefined {
+	const result = spawnSync("ps", ["-p", String(pid), "-o", "args="], { encoding: "utf8", timeout: 2_000 });
+	return result.status === 0 ? result.stdout.trim() : undefined;
+}
+
+function parsePort(value: string | undefined, label: string): number | undefined {
+	if (!value) return undefined;
+	const port = Number(value);
+	if (!Number.isInteger(port) || port <= 0 || port > 65535) throw new Error(`Invalid ${label}=${value}; expected TCP port 1-65535`);
+	return port;
+}
+
+function parseScanCount(value: string | undefined): number {
+	if (!value) return 20;
+	const count = Number(value);
+	if (!Number.isInteger(count) || count <= 0) throw new Error(`Invalid DS4_AUTO_PORT_SCAN_COUNT=${value}; expected positive integer`);
+	return count;
+}
+
+function portFromBaseUrl(value: unknown): number | undefined {
+	if (typeof value !== "string") return undefined;
+	try {
+		const parsed = new URL(value);
+		if (!parsed.port) return undefined;
+		return parsePort(parsed.port, "state baseUrl port");
+	} catch {
+		return undefined;
+	}
+}
+
+function managedStatePortSync(): number | undefined {
+	try {
+		const state = JSON.parse(readFileSync(STATE_FILE, "utf8")) as Partial<ServerState>;
+		if (state.managedBy !== MANAGED_BY || !state.pid || !isPidAlive(state.pid)) return undefined;
+		if (!DS4_SERVER_ARGS_RE.test(syncProcessArgs(state.pid) ?? "")) return undefined;
+		return portFromBaseUrl(state.baseUrl);
+	} catch {
+		return undefined;
+	}
+}
+
+function isPortListeningSync(port: number): boolean {
+	const result = spawnSync("lsof", ["-nP", `-tiTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8", timeout: 2_000 });
+	return result.status === 0 && result.stdout.trim().length > 0;
+}
+
+function selectedServerPort(): number {
+	const forcedPort = parsePort(process.env.DS4_PORT, "DS4_PORT");
+	if (forcedPort) return forcedPort;
+
+	const managedPort = managedStatePortSync();
+	if (managedPort) return managedPort;
+
+	for (let offset = 0; offset < AUTO_PORT_SCAN_COUNT; offset++) {
+		const port = DEFAULT_SERVER_PORT + offset;
+		if (!isPortListeningSync(port)) return port;
+	}
+	throw new Error(
+		`No free ds4-server port found in ${DEFAULT_SERVER_PORT}-${DEFAULT_SERVER_PORT + AUTO_PORT_SCAN_COUNT - 1}; set DS4_PORT to choose one`,
+	);
+}
+
+let SERVER_PORT = selectedServerPort();
+let BASE_URL = `http://${SERVER_CLIENT_HOST}:${SERVER_PORT}`;
+let API_BASE_URL = `${BASE_URL}/v1`;
+let SERVER_ARGS = serverArgsForPort(SERVER_PORT);
+
+function serverArgsForPort(port: number): string[] {
+	return [
+		"--host",
+		SERVER_BIND_HOST,
+		"--port",
+		String(port),
+		"--ctx",
+		"100000",
+		"--kv-disk-dir",
+		KV_DIR,
+		"--kv-disk-space-mb",
+		"8192",
+	];
+}
+
+function configureServerPort(port: number): void {
+	SERVER_PORT = port;
+	BASE_URL = `http://${SERVER_CLIENT_HOST}:${SERVER_PORT}`;
+	API_BASE_URL = `${BASE_URL}/v1`;
+	SERVER_ARGS = serverArgsForPort(SERVER_PORT);
+}
+
+function stateMatchesSelectedPort(state: ServerState): boolean {
+	return portFromBaseUrl(state.baseUrl) === SERVER_PORT;
+}
 
 const HEARTBEAT_MS = 10_000;
 const LEASE_TTL_MS = 45_000;
@@ -436,14 +532,20 @@ async function isLeaseForLiveProcess(lease: Lease | undefined): Promise<boolean>
 
 async function looksLikeDs4Server(pid: number): Promise<boolean> {
 	const args = await processArgs(pid);
-	return !!args && /(^|[/\s])ds4-server(\s|$)/.test(args);
+	return !!args && DS4_SERVER_ARGS_RE.test(args);
+}
+
+async function listeningPidsOnServerPort(): Promise<number[]> {
+	const output = await execCapture("lsof", ["-nP", `-tiTCP:${SERVER_PORT}`, "-sTCP:LISTEN"], 2_000);
+	return (output ?? "")
+		.split(/\r?\n/)
+		.map((line) => Number(line.trim()))
+		.filter((pid) => Number.isInteger(pid) && isPidAlive(pid));
 }
 
 async function findListeningDs4ServerPid(): Promise<number | undefined> {
-	const output = await execCapture("lsof", ["-nP", "-tiTCP:8000", "-sTCP:LISTEN"], 2_000);
-	for (const line of (output ?? "").split(/\r?\n/)) {
-		const pid = Number(line.trim());
-		if (Number.isInteger(pid) && isPidAlive(pid) && (await looksLikeDs4Server(pid))) return pid;
+	for (const pid of await listeningPidsOnServerPort()) {
+		if (await looksLikeDs4Server(pid)) return pid;
 	}
 	return undefined;
 }
@@ -518,6 +620,7 @@ async function ensureWatchdog(): Promise<void> {
 				DS4_STATE_FILE: STATE_FILE,
 				DS4_LOG_FILE: LOG_FILE,
 				DS4_BASE_URL: API_BASE_URL,
+				DS4_PORT: String(SERVER_PORT),
 				DS4_LEASE_TTL_S: String(Math.ceil(LEASE_TTL_MS / 1000)),
 				DS4_WATCHDOG_POLL_S: String(Math.max(1, Math.ceil(WATCHDOG_POLL_MS / 1000))),
 				DS4_SHUTDOWN_GRACE_S: String(Math.ceil(SHUTDOWN_GRACE_MS / 1000)),
@@ -971,6 +1074,16 @@ async function waitForServerReady(onStatus?: StatusCallback): Promise<void> {
 }
 
 async function startServerLocked(runtimeDir: string): Promise<void> {
+	const listeningPids = await listeningPidsOnServerPort();
+	if (listeningPids.length > 0) {
+		const ds4Pid = await findListeningDs4ServerPid();
+		if (ds4Pid) {
+			await writeAdoptedServerStateLocked(ds4Pid);
+			return;
+		}
+		throw new Error(`Cannot start ds4-server: ${BASE_URL} is already in use by pid(s) ${listeningPids.join(", ")}`);
+	}
+
 	const binary = process.env.DS4_SERVER_BINARY ?? join(runtimeDir, "ds4-server");
 	try {
 		await access(binary, constants.X_OK);
@@ -1023,15 +1136,21 @@ async function ensureServerManagedInner(onStatus?: StatusCallback): Promise<void
 
 		const state = await readState();
 		if (state?.pid && isPidAlive(state.pid) && (await looksLikeDs4Server(state.pid))) {
-			if (state.stopping) stoppingPid = state.pid;
-			return;
+			if (stateMatchesSelectedPort(state)) {
+				if (state.stopping) stoppingPid = state.pid;
+				return;
+			}
+			throw new Error(`A managed ds4-server is already running at ${state.baseUrl}; stop it before switching to ${API_BASE_URL}`);
 		}
 
 		if (state?.pid) await clearState();
 		if (await checkHttpReady()) {
 			const pid = await findListeningDs4ServerPid();
-			if (pid) await writeAdoptedServerStateLocked(pid);
-			return;
+			if (pid) {
+				await writeAdoptedServerStateLocked(pid);
+				return;
+			}
+			throw new Error(`Refusing to use ${API_BASE_URL}: it is not a ds4-server process`);
 		}
 		if (runtimeDisposed || shuttingDown) return;
 
@@ -1160,6 +1279,17 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("before_provider_request", async (_event, ctx) => {
 		if (ctx.model?.provider !== PROVIDER_ID || ctx.model?.id !== MODEL_ID) return;
+
+		// The watchdog is launched with the selected port and supervises that port
+		// for the lifetime of this extension instance. Re-select only before it
+		// starts; hot-swapping ports would leave the watchdog supervising stale state.
+		if (!watchdogStarted) {
+			const port = selectedServerPort();
+			if (port !== SERVER_PORT) {
+				configureServerPort(port);
+				registerDs4Provider(pi);
+			}
+		}
 
 		const alreadyReady = await checkHttpReady();
 		let lastNotification: string | undefined;

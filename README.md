@@ -60,5 +60,14 @@ Environment overrides:
 - `DS4_MODEL_QUANT`: force `q2` or `q4` (otherwise picked from system memory)
 - `DS4_READY_TIMEOUT_MS`: server startup timeout
 - `DS4_SERVER_BINARY`: custom `ds4-server` binary path
+- `DS4_PORT`: force the local `ds4-server` port. Without it, pi-ds4 reuses an
+  existing managed server port, or picks the first free port in the auto-scan range.
+- `DS4_HOST`: bind host (default `127.0.0.1`). Non-loopback values such as
+  `0.0.0.0` expose the local model server to the network; pi-ds4 still connects
+  through `127.0.0.1` when binding all interfaces.
+- `DS4_AUTO_PORT_SCAN_COUNT`: number of ports to scan starting at 8000 (default
+  `20`, so the default scan range is 8000-8019). If no port in the range is free,
+  set `DS4_PORT` explicitly. The selected port is fixed once the watchdog starts;
+  restart pi to change it.
 
 Use `/ds4` inside pi to show the live ds4 log.

@@ -12,7 +12,8 @@ fi
 client_dir=${DS4_CLIENT_DIR:-$ds4_dir/clients}
 state_file=${DS4_STATE_FILE:-$ds4_dir/server.json}
 log_file=${DS4_LOG_FILE:-$ds4_dir/log}
-base_url=${DS4_BASE_URL:-http://127.0.0.1:8000/v1}
+base_url=${DS4_BASE_URL:-http://127.0.0.1:${DS4_PORT:-8000}/v1}
+listen_port=${DS4_PORT:-8000}
 lease_ttl_s=${DS4_LEASE_TTL_S:-45}
 poll_s=${DS4_WATCHDOG_POLL_S:-2}
 shutdown_grace_s=${DS4_SHUTDOWN_GRACE_S:-60}
@@ -50,7 +51,7 @@ looks_like_ds4_server() {
 
 find_ds4_server_pid() {
   if command -v lsof >/dev/null 2>&1; then
-    for pid in $(lsof -nP -tiTCP:8000 -sTCP:LISTEN 2>/dev/null); do
+    for pid in $(lsof -nP -tiTCP:$listen_port -sTCP:LISTEN 2>/dev/null); do
       if pid_alive "$pid" && looks_like_ds4_server "$pid"; then
         echo "$pid"
         return 0
