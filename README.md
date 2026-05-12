@@ -62,3 +62,12 @@ Environment overrides:
 - `DS4_SERVER_BINARY`: custom `ds4-server` binary path
 
 Use `/ds4` inside pi to show the live ds4 log.
+
+Use `/ds4-update check` to fetch and compare the managed ds4 runtime checkout
+against `origin/$DS4_SUPPORT_BRANCH` (`main` by default). Use `/ds4-update apply`
+to reset the runtime to the fetched remote revision and rebuild `ds4-server`.
+If the runtime has local tracked modifications, `/ds4-update apply` refuses to
+clobber them; `/ds4-update force` discards tracked modifications with
+`git reset --hard` before rebuilding. Untracked model files are left alone. If a
+`ds4-server` process is already running, the rebuilt binary takes effect after
+the server is restarted.

@@ -1,5 +1,5 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { spawn } from "node:child_process";
+import type { ExtensionAPI, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { execFile, spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { closeSync, constants, openSync, writeSync } from "node:fs";
 import {
@@ -19,6 +19,9 @@ import {
 import { homedir, totalmem } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 
@@ -87,9 +90,18 @@ type Lease = {
 
 type StatusCallback = (message: string | undefined) => void;
 type RunLoggedOptions = { onStatus?: StatusCallback; progressPrefix?: string };
+type RuntimeUpdateStatus = {
+	runtimeDir: string;
+	isGitCheckout: boolean;
+	current?: string;
+	remote?: string;
+	branch: string;
+	remoteRef: string;
+	dirty?: boolean;
+};
 
 type LogTui = { terminal: { rows: number }; requestRender: (force?: boolean) => void };
-type LogTheme = { fg: (color: string, text: string) => string };
+type LogTheme = { fg: (color: ThemeColor, text: string) => string };
 type Component = { render(width: number): string[]; handleInput?(data: string): void; invalidate(): void };
 
 const WATCHDOG_SCRIPT_NAME = "ds4-watchdog.sh";
@@ -704,6 +716,17 @@ async function runLogged(command: string, args: string[], cwd: string, label: st
 	});
 }
 
+async function runCapture(command: string, args: string[], cwd: string, label: string): Promise<string> {
+	if (runtimeDisposed || shuttingDown) throw new Error(`${label} cancelled`);
+	try {
+		const { stdout } = await execFileAsync(command, args, { cwd });
+		return stdout.trim();
+	} catch (error: any) {
+		const detail = (error?.stderr || error?.stdout || "").trim();
+		throw new Error(`${label} failed${detail ? `: ${detail}` : error?.message ? `: ${error.message}` : ""}`);
+	}
+}
+
 function killActiveSetupChild(): void {
 	const child = activeSetupChild;
 	if (!child?.pid) return;
@@ -770,6 +793,88 @@ async function resolveRuntimeDirLocked(onStatus?: StatusCallback): Promise<strin
 
 	resolvedRuntimeDir = await ensureSupportCheckout(onStatus);
 	return resolvedRuntimeDir;
+}
+
+async function runtimeUpdateStatus(
+	onStatus?: StatusCallback,
+	options: { fetchRemote?: boolean; runtimeDir?: string } = {},
+): Promise<RuntimeUpdateStatus> {
+	const fetchRemote = options.fetchRemote ?? true;
+	const runtimeDir = options.runtimeDir ?? (await resolveRuntimeDirLocked(onStatus));
+	const branch = SUPPORT_BRANCH;
+	const remoteRef = `refs/remotes/origin/${branch}`;
+	const status: RuntimeUpdateStatus = {
+		runtimeDir,
+		isGitCheckout: false,
+		branch,
+		remoteRef,
+	};
+
+	try {
+		await stat(join(runtimeDir, ".git"));
+		status.isGitCheckout = true;
+	} catch (error: any) {
+		if (error?.code === "ENOENT") return status;
+		throw error;
+	}
+
+	if (fetchRemote) {
+		onStatus?.("checking ds4 runtime updates");
+		await runLogged("git", ["fetch", "--progress", "origin", `+refs/heads/${branch}:${remoteRef}`], runtimeDir, "fetch ds4 runtime updates", {
+			onStatus,
+			progressPrefix: "checking ds4 runtime updates",
+		});
+	}
+
+	status.current = await runCapture("git", ["rev-parse", "HEAD"], runtimeDir, "read ds4 runtime HEAD");
+	status.remote = await runCapture("git", ["rev-parse", remoteRef], runtimeDir, "read ds4 runtime remote HEAD");
+	const dirty = await runCapture(
+		"git",
+		["status", "--porcelain", "--untracked-files=no"],
+		runtimeDir,
+		"check ds4 runtime local modifications",
+	);
+	status.dirty = dirty.length > 0;
+	return status;
+}
+
+function formatRuntimeUpdateStatus(status: RuntimeUpdateStatus): string {
+	if (!status.isGitCheckout) return `ds4 runtime at ${status.runtimeDir} is not a git checkout; cannot check for updates`;
+	const current = status.current!.slice(0, 12);
+	const remote = status.remote!.slice(0, 12);
+	const dirty = status.dirty ? "; local tracked modifications present" : "";
+	if (status.current !== status.remote) return `ds4 runtime update available: ${current} -> ${remote}${dirty}`;
+	return `ds4 runtime is up to date at ${current}${dirty}`;
+}
+
+async function managedServerIsRunning(): Promise<boolean> {
+	// Advisory only: this intentionally avoids taking the lifecycle lock, so it may
+	// miss a concurrent startup/shutdown but cannot delay the update command exit.
+	const state = await readJson<ServerState>(STATE_FILE);
+	return !!state?.pid && state.managedBy === MANAGED_BY && isPidAlive(state.pid);
+}
+
+async function updateRuntime(onStatus?: StatusCallback, force = false): Promise<RuntimeUpdateStatus> {
+	return await withLock(async () => {
+		const before = await runtimeUpdateStatus(onStatus, { fetchRemote: true });
+		if (!before.isGitCheckout) throw new Error(`ds4 runtime at ${before.runtimeDir} is not a git checkout`);
+		if (before.dirty && !force) {
+			throw new Error("ds4 runtime has local tracked modifications; use /ds4-update force to discard them");
+		}
+		if (!before.remote) throw new Error("could not determine ds4 runtime remote revision");
+		if (before.current === before.remote && !force) return before;
+
+		onStatus?.("updating ds4 runtime");
+		await runLogged("git", ["reset", "--hard", before.remoteRef], before.runtimeDir, "update ds4 runtime checkout", {
+			onStatus,
+			progressPrefix: "updating ds4 runtime",
+		});
+
+		// Force a rebuild even if make would consider an existing binary current.
+		await rm(join(before.runtimeDir, "ds4-server"), { force: true });
+		await ensureBuilt(before.runtimeDir, onStatus);
+		return { ...before, current: before.remote, dirty: false };
+	}, STARTUP_LOCK_TIMEOUT_MS);
 }
 
 async function ensureBuilt(runtimeDir: string, onStatus?: StatusCallback): Promise<void> {
@@ -1075,6 +1180,56 @@ async function stopServerIfUnused(): Promise<void> {
 }
 
 function registerDs4Command(pi: ExtensionAPI): void {
+	pi.registerCommand("ds4-update", {
+		description: "Check for or apply ds4 runtime updates",
+		getArgumentCompletions: (prefix: string) => {
+			const normalizedPrefix = prefix.toLowerCase();
+			const items = [
+				{ value: "check", label: "check" },
+				{ value: "apply", label: "apply" },
+				{ value: "force", label: "force" },
+			];
+			const matches = items.filter((item) => item.value.startsWith(normalizedPrefix));
+			return matches.length > 0 ? matches : null;
+		},
+		handler: async (args, ctx) => {
+			const action = args.trim().toLowerCase() || "check";
+			let lastNotification: string | undefined;
+			let lastNotificationAt = 0;
+			const onStatus: StatusCallback = (message) => {
+				if (!message || message === lastNotification) return;
+				const now = Date.now();
+				if (now - lastNotificationAt < 5_000 && /\d+%|\d+\.\d+\s*[KMGT]?i?B|Receiving objects|Resolving deltas/.test(message)) return;
+				lastNotification = message;
+				lastNotificationAt = now;
+				ctx.ui.notify(message, "info");
+			};
+
+			try {
+				if (action === "check") {
+					const runtimeDir = await withLock(() => resolveRuntimeDirLocked(onStatus), LOCK_TIMEOUT_MS);
+					const status = await runtimeUpdateStatus(onStatus, { fetchRemote: true, runtimeDir });
+					const severity = status.dirty || status.current !== status.remote ? "warning" : "info";
+					ctx.ui.notify(formatRuntimeUpdateStatus(status), severity);
+					return;
+				}
+
+				if (action === "apply" || action === "force") {
+					const status = await updateRuntime(onStatus, action === "force");
+					ctx.ui.notify(formatRuntimeUpdateStatus(status), "info");
+					if (await managedServerIsRunning()) {
+						ctx.ui.notify("ds4 runtime rebuilt; restart ds4-server to use the new binary", "warning");
+					}
+					return;
+				}
+
+				ctx.ui.notify("Usage: /ds4-update [check|apply|force]", "error");
+			} catch (error) {
+				ctx.ui.notify(`ds4 runtime update failed: ${describeError(error)}`, "error");
+			}
+		},
+	});
+
 	pi.registerCommand("ds4", {
 		description: "Show the live ds4-server log",
 		handler: async (_args, ctx) => {
