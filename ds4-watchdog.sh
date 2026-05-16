@@ -27,7 +27,8 @@ pid_alive() {
 }
 
 mtime_sec() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+  mt=$(stat -f %m "$1" 2>/dev/null) || mt=$(stat -c %Y "$1" 2>/dev/null) || mt=0
+  echo "${mt:-0}"
 }
 
 process_args() {
