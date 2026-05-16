@@ -25,6 +25,7 @@ const EXTENSION_DIR = dirname(fileURLToPath(import.meta.url));
 const PROVIDER_ID = "ds4";
 const MODEL_ID = "deepseek-v4-flash";
 const Q2_IMATRIX_MODEL_ID = "deepseek-v4-flash-q2-imatrix";
+const Q4_IMATRIX_MODEL_ID = "deepseek-v4-flash-q4-imatrix";
 // Keep the historical typo for on-disk lease/state compatibility with older installs.
 const MANAGED_BY = "pi-sd4-provider";
 
@@ -129,7 +130,7 @@ const WATCHDOG_POLL_MS = 2_000;
 const PROGRESS_NOTIFY_MS = 750;
 const PROGRESS_MAX_CHARS = 160;
 
-type ModelQuant = "q2" | "q2-imatrix" | "q4";
+type ModelQuant = "q2" | "q2-imatrix" | "q4" | "q4-imatrix";
 
 type ServerState = {
 	managedBy: string;
@@ -247,29 +248,34 @@ function truncateText(value: string, width: number, ellipsis = "", pad = false):
 
 function selectedDefaultModelQuant(): ModelQuant {
 	const forced = configString("DS4_MODEL_QUANT")?.toLowerCase();
-	if (forced === "q2" || forced === "q2-imatrix" || forced === "q4") return forced;
-	if (forced) throw new Error(`Invalid DS4_MODEL_QUANT=${forced}; expected q2, q2-imatrix or q4`);
+	if (forced === "q2" || forced === "q2-imatrix" || forced === "q4" || forced === "q4-imatrix") return forced;
+	if (forced) throw new Error(`Invalid DS4_MODEL_QUANT=${forced}; expected q2, q2-imatrix, q4, or q4-imatrix`);
 
 	const ramGb = totalmem() / 1_000_000_000;
-	if (ramGb >= 256) return "q4";
-	if (ramGb >= 128) return "q2";
+	if (ramGb >= 256) return "q4-imatrix";
+	if (ramGb >= 128) return "q2-imatrix";
 	throw new Error(
-		`DeepSeek V4 Flash requires at least 128 GB RAM for the q2 model; detected ${ramGb.toFixed(1)} GB`,
+		`DeepSeek V4 Flash requires at least 128 GB RAM; detected ${ramGb.toFixed(1)} GB`,
 	);
 }
 
 function modelQuantForModelId(modelId: string | undefined): ModelQuant | undefined {
 	if (modelId === Q2_IMATRIX_MODEL_ID) return "q2-imatrix";
+	if (modelId === Q4_IMATRIX_MODEL_ID) return "q4-imatrix";
 	if (modelId === MODEL_ID) return selectedDefaultModelQuant();
 	return undefined;
 }
 
 function modelIdForQuant(modelQuant: ModelQuant): string {
-	return modelQuant === "q2-imatrix" ? Q2_IMATRIX_MODEL_ID : MODEL_ID;
+	if (modelQuant === "q2-imatrix") return Q2_IMATRIX_MODEL_ID;
+	if (modelQuant === "q4-imatrix") return Q4_IMATRIX_MODEL_ID;
+	return MODEL_ID;
 }
 
 function kvDirForQuant(modelQuant: ModelQuant): string {
-	return modelQuant === "q2-imatrix" ? join(DS4_DIR, "kv-q2-imatrix") : KV_DIR;
+	if (modelQuant === "q2-imatrix") return join(DS4_DIR, "kv-q2-imatrix");
+	if (modelQuant === "q4-imatrix") return join(DS4_DIR, "kv-q4-imatrix");
+	return KV_DIR;
 }
 
 function serverArgsForModel(modelQuant: ModelQuant, modelPath: string): string[] {
@@ -280,14 +286,15 @@ function serverStateMatchesQuant(state: ServerState | undefined, modelQuant: Mod
 	if (!state) return false;
 	if (state.modelQuant) return state.modelQuant === modelQuant;
 	// Older pi-ds4 installs did not record the quant. Treat them as matching the
-	// historical default model, but never as the explicit q2-imatrix choice.
-	return modelQuant !== "q2-imatrix";
+	// historical default model, but never as the explicit imatrix choices.
+	return modelQuant !== "q2-imatrix" && modelQuant !== "q4-imatrix";
 }
 
 async function ensureDirs(): Promise<void> {
 	await mkdir(CLIENT_DIR, { recursive: true });
 	await mkdir(KV_DIR, { recursive: true });
 	await mkdir(kvDirForQuant("q2-imatrix"), { recursive: true });
+	await mkdir(kvDirForQuant("q4-imatrix"), { recursive: true });
 }
 
 async function readJson<T>(file: string): Promise<T | undefined> {
@@ -1200,9 +1207,9 @@ async function ensureServerManagedInner(modelQuant: ModelQuant, onStatus?: Statu
 		if (await checkHttpReady()) {
 			const pid = await findListeningDs4ServerPid();
 			if (pid) {
-				if (modelQuant === "q2-imatrix") {
-					onStatus?.("switching ds4-server to q2-imatrix model");
-					await stopServerPidLocked(pid, "replace unknown ds4-server with q2-imatrix");
+				if (modelQuant === "q2-imatrix" || modelQuant === "q4-imatrix") {
+					onStatus?.(`switching ds4-server to ${modelQuant} model`);
+					await stopServerPidLocked(pid, `replace unknown ds4-server with ${modelQuant}`);
 				} else {
 					await writeAdoptedServerStateLocked(pid);
 					return;
@@ -1339,6 +1346,7 @@ function registerDs4Provider(pi: ExtensionAPI): void {
 		models: [
 			ds4Model(MODEL_ID, "DeepSeek V4 Flash (ds4.c local)"),
 			ds4Model(Q2_IMATRIX_MODEL_ID, "DeepSeek V4 Flash q2 imatrix (ds4.c local)"),
+			ds4Model(Q4_IMATRIX_MODEL_ID, "DeepSeek V4 Flash q4 imatrix (ds4.c local)"),
 		],
 	} as any);
 }

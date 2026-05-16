@@ -77,7 +77,7 @@
     },
     "modelQuant": {
       "type": ["string", "null"],
-      "enum": ["q2", "q2-imatrix", "q4", null]
+      "enum": ["q2", "q2-imatrix", "q4", "q4-imatrix", null]
     }
   }
 }
