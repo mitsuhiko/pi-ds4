@@ -112,7 +112,16 @@ const BASE_URL = "http://127.0.0.1:8000";
 const API_BASE_URL = `${BASE_URL}/v1`;
 const PROVIDER_API = selectedProtocol();
 const PROVIDER_BASE_URL = PROVIDER_API === "anthropic-messages" ? BASE_URL : API_BASE_URL;
+const SERVER_POWER = (() => {
+	const raw = configNumber("DS4_POWER", 100);
+	if (raw < 1 || raw > 100) throw new Error(`DS4_POWER must be between 1 and 100; got ${raw}`);
+	return raw;
+})();
+
 const SERVER_BASE_ARGS = ["--ctx", "100000", "--kv-disk-space-mb", "8192"];
+if (SERVER_POWER < 100) {
+	SERVER_BASE_ARGS.push("--power", String(SERVER_POWER));
+}
 
 const HEARTBEAT_MS = 10_000;
 const LEASE_TTL_MS = 45_000;

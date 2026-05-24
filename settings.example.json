@@ -8,5 +8,6 @@
   "modelQuant": null,
   "readyTimeoutMs": 600000,
   "serverBinary": null,
-  "watchdogScript": null
+  "watchdogScript": null,
+  "power": 100
 }

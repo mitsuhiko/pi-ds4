@@ -50,7 +50,11 @@
     "watchdogScript": { "$ref": "#/$defs/nullableString" },
     "watchdog_script": { "$ref": "#/$defs/nullableString" },
     "DS4_WATCHDOG_SCRIPT": { "$ref": "#/$defs/nullableString" },
-    "ds4_watchdog_script": { "$ref": "#/$defs/nullableString" }
+    "ds4_watchdog_script": { "$ref": "#/$defs/nullableString" },
+
+    "power": { "$ref": "#/$defs/powerPercent" },
+    "DS4_POWER": { "$ref": "#/$defs/powerPercent" },
+    "ds4_power": { "$ref": "#/$defs/powerPercent" }
   },
   "$defs": {
     "nullableString": {
@@ -78,6 +82,12 @@
     "modelQuant": {
       "type": ["string", "null"],
       "enum": ["q2", "q2-imatrix", "q4", null]
+    },
+    "powerPercent": {
+      "type": ["number", "null"],
+      "minimum": 1,
+      "maximum": 100,
+      "description": "GPU duty cycle percentage (1..100). Default: 100 (full speed). Passed as --power N to ds4-server."
     }
   }
 }
