@@ -181,22 +181,22 @@ type DownloadableModel = {
 const DOWNLOADABLE_MODELS: DownloadableModel[] = [
 	{
 		key: "dsv4-flash-q2",
-		target: "q2-imatrix",
-		fileVariable: "Q2_IMATRIX_FILE",
+		target: "ds4f-q2",
+		fileVariable: "DS4F_Q2_FILE",
 		name: "DeepSeek V4 Flash · Q2 imatrix",
 		menuLabel: "DeepSeek V4 Flash / Q2 imatrix — about 81 GB; ≥96 GB RAM",
 	},
 	{
 		key: "dsv4-flash-q2q4",
-		target: "q2-q4-imatrix",
-		fileVariable: "Q2_Q4_IMATRIX_FILE",
+		target: "ds4f-q2-q4",
+		fileVariable: "DS4F_Q2_Q4_FILE",
 		name: "DeepSeek V4 Flash · Q2/Q4 imatrix",
 		menuLabel: "DeepSeek V4 Flash / Q2-Q4 imatrix — about 98 GB; ≥128 GB RAM",
 	},
 	{
 		key: "dsv4-flash-q4",
-		target: "q4-imatrix",
-		fileVariable: "Q4_IMATRIX_FILE",
+		target: "ds4f-q4",
+		fileVariable: "DS4F_Q4_FILE",
 		name: "DeepSeek V4 Flash · Q4 imatrix",
 		menuLabel: "DeepSeek V4 Flash / Q4 imatrix — about 153 GB; ≥256 GB RAM",
 	},
