@@ -1,7 +1,7 @@
 {
   "name": "pi-ds4",
   "version": "0.1.0",
-  "description": "Pi provider extension for local ds4.c DeepSeek V4 and GLM 5.2 inference.",
+  "description": "Pi provider extension for local ds4.c DeepSeek V4, DeepSeek V4.1 and GLM 5.2 inference.",
   "type": "module",
   "license": "MIT",
   "keywords": [

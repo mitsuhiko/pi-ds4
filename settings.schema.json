@@ -46,6 +46,11 @@
     "DS4_POWER": { "$ref": "#/$defs/powerPercent" },
     "ds4_power": { "$ref": "#/$defs/powerPercent" },
 
+    "ssdStreaming": { "$ref": "#/$defs/ssdStreaming" },
+    "ssd_streaming": { "$ref": "#/$defs/ssdStreaming" },
+    "DS4_SSD_STREAMING": { "$ref": "#/$defs/ssdStreaming" },
+    "ds4_ssd_streaming": { "$ref": "#/$defs/ssdStreaming" },
+
     "readyTimeoutMs": { "$ref": "#/$defs/nullableNumber" },
     "ready_timeout_ms": { "$ref": "#/$defs/nullableNumber" },
     "DS4_READY_TIMEOUT_MS": { "$ref": "#/$defs/nullableNumber" },
@@ -79,7 +84,13 @@
       "maximum": 100,
       "pattern": "^(?:[1-9]|[1-9][0-9]|100)$",
       "default": 100,
-      "description": "GPU duty-cycle target from 1 to 100. Lower values apply to DeepSeek models; GLM 5.2 currently always runs at 100."
+      "description": "GPU duty-cycle target from 1 to 100. Lower values apply to DeepSeek V4 models; GLM 5.2 and DeepSeek V4.1 always run at 100."
+    },
+    "ssdStreaming": {
+      "type": ["boolean", "string", "null"],
+      "enum": [true, false, "auto", "true", "false", "yes", "no", "on", "off", "1", "0", null],
+      "default": "auto",
+      "description": "Run ds4-server with --ssd-streaming. auto (default) enables it for models whose resident weights do not fit in system RAM, such as DeepSeek V4.1."
     },
     "protocol": {
       "type": ["string", "null"],
