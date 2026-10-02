@@ -186,7 +186,9 @@ EOF
 
 clear_state_if_dead() {
   pid=$1
-  if ! pid_alive "$pid"; then
+  # A pi that was waiting for this server to exit may already have started
+  # its replacement and written the state file for it.
+  if ! pid_alive "$pid" && [ "$(state_pid)" = "$pid" ]; then
     rm -f "$state_file" 2>/dev/null || true
   fi
 }
